@@ -187,9 +187,9 @@ static write_ctx_t *write_ctx_alloc(knot_mm_t *mm)
 static int generate_answer(tcp_client_t *client, write_ctx_t *write)
 {
 	/* Timeout. */
-	//rcu_read_lock();
+	rcu_read_lock();
 	int timeout = 1000 * conf()->cache.srv_tcp_idle_timeout;
-	//rcu_read_unlock();
+	rcu_read_unlock();
 	client->timeout = uv_now(client->handle.loop) + timeout;
 
 	/* Resolve until NOOP or finished. */
@@ -212,10 +212,6 @@ static int generate_answer(tcp_client_t *client, write_ctx_t *write)
 	log_debug("knot_layer:finnish");
 	return DONE;
 }
-
-
-
-
 
 static void client_save_buffer(tcp_client_t *client)
 {
@@ -308,10 +304,10 @@ static void on_connection(uv_stream_t* server, int status)
 	tcp_client_t *client = client_alloc(server->loop);
 
 	/* Timeout. */
-	//rcu_read_lock();
+	rcu_read_lock();
 	int timeout = 1000 * conf()->cache.srv_tcp_hshake_timeout;
 	int max_clients = conf()->cache.srv_max_tcp_clients;
-	//rcu_read_unlock();
+	rcu_read_unlock();
 	client->timeout = uv_now(client->handle.loop) + timeout;
 
 	/* int max_per_thread = MAX(max_clients / tcp->server->handlers[IO_TCP].size, 1);
@@ -359,9 +355,31 @@ static void close_client(uv_handle_t* handle, void* arg)
 	}
 }
 
+static void close_tcp(uv_handle_t* handle, void* arg)
+{
+	if (handle->type == UV_TCP) {
+		tcp_ctx_t *ctx = handle->data;
+		if (ctx->type == TCP_SERVER) {
+			tcp_server_t *server = handle->data;
+			server->handle.io_watcher.fd = 0;
+		}
+		uv_close(handle, on_close_free);
+	}
+}
+
 static void close_all(uv_handle_t* handle, void* arg)
 {
+	if (handle->type == UV_TCP) {
+		tcp_ctx_t *ctx = handle->data;
+		if (ctx->type == TCP_SERVER) {
+			tcp_server_t *server = handle->data;
+			server->handle.io_watcher.fd = 0;
+			log_debug("tcp");
+		}
+	}
+	log_debug("handle_close");
 	uv_close(handle, on_close_free);
+
 }
 
 static void close_handle_fd(uv_handle_t* handle, void* arg)
@@ -378,25 +396,26 @@ static void reconfigure_loop(uv_loop_t *loop)
 	loop_ctx_t *tcp = loop->data;
 	iface_t *i = NULL;
 
-	uv_walk(loop, close_client, NULL);
+	uv_walk(loop, close_tcp, NULL);
+	/*uv_walk(loop, close_client, NULL);
 	if (tcp->old_ifaces != NULL) {
 		WALK_LIST(i, tcp->old_ifaces->u) {
 			uv_walk(loop, close_handle_fd, &i->fd_tcp);
 		}
 		ref_release(&tcp->old_ifaces->ref);
-	}
+	}*/
 
-	//rcu_read_lock();
+	rcu_read_lock();
 	tcp->old_ifaces  = tcp->handler->server->ifaces;
 	int multiproccess = tcp->server->handlers[IO_TCP].size > 1;
-	WALK_LIST(i, tcp->handler->server->ifaces->u) {
+	WALK_LIST(i, tcp->handler->server->ifaces->l) {
 		tcp_server_t *server;
 		if (server_alloc_listen(&server, loop, i->fd_tcp,
 		    &tcp->old_ifaces->ref) == KNOT_EOK) {
 			uv_tcp_simultaneous_accepts(&server->handle, !multiproccess);
 		}
 	}
-	//rcu_read_unlock();
+	rcu_read_unlock();
 }
 
 static void cancel_check(uv_idle_t* handle)
